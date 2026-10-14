@@ -151,20 +151,28 @@
       ? missing[0] : null;
   }
 
-  function checkCommitted() {
-    if (!active || !tapped || tapped.key !== active.key) return;
+  
+function checkCommitted() {
+  if (!active || !tapped || tapped.key !== active.key) return;
 
-    const hand = getHand();
-    const now = getTiles(hand);
-    const detected = detectDiscard(active.tiles, now);
+  const el = tapped.element;
+  const confirmed = el && (
+    el.classList.contains('dapai') ||
+    !!el.querySelector('.dapai') ||
+    !el.hasAttribute('role') ||
+    !el.isConnected
+  );
 
-    if (detected && detected === tapped.tile) {
-      showReview(detected);
-      unmark();
-      active = null;
-      tapped = null;
-    }
+  const now = getTiles(getHand());
+  const detected = detectDiscard(active.tiles, now);
+
+  if (confirmed || detected === tapped.tile) {
+    showReview(tapped.tile);
+    unmark();
+    active = null;
+    tapped = null;
   }
+}
 
   // iPhoneの1回目のタップは選択のみ。打牌確定後に評価。
   document.addEventListener('click', e => {
@@ -174,7 +182,11 @@
     );
 
     if (!tile || !active) return;
-    tapped = { tile: tile.dataset.pai, key: active.key };
+tapped = {
+  tile: tile.dataset.pai,
+  key: active.key,
+  element: tile
+};
 
     setTimeout(checkCommitted, 30);
     setTimeout(checkCommitted, 150);
@@ -185,6 +197,7 @@
     if (!panel.isConnected) document.body.appendChild(panel);
 
     checkCommitted();
+    if (Date.now() < reviewUntil) return;
 
     const hand = getHand();
     const tiles = getTiles(hand);

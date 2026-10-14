@@ -2,6 +2,7 @@
 'use strict';
 
 // 電脳麻将・無料牌効率コーチ Ver.3
+// UI: ヒントと打牌履歴はボタン操作時のみ表示
 (function () {
   const suits = { m: '萬', p: '筒', s: '索' };
   const honors = ['', '東', '南', '西', '北', '白', '發', '中'];
@@ -10,17 +11,50 @@
     : (p[1] === '0' ? '赤5' : p[1]) + suits[p[0]];
 
   const panel = document.createElement('div');
-  panel.style.cssText =
-    'position:fixed;top:12px;right:8px;z-index:99999;' +
-    'max-width:82vw;padding:10px 12px;border-radius:12px;' +
-    'background:#102b27;color:white;font:13px/1.5 sans-serif;' +
-    'box-shadow:0 3px 14px #0008;white-space:pre-line;' +
-    'pointer-events:none;display:none';
+  panel.id = 'majiang-coach-panel';
+  panel.style.display = 'none';
+
+  const historyButton = document.createElement('button');
+  historyButton.id = 'majiang-coach-history-button';
+  historyButton.type = 'button';
+  historyButton.textContent = '📖 履歴 4.1';
+  historyButton.setAttribute('aria-controls', 'majiang-coach-history-box');
+  historyButton.setAttribute('aria-expanded', 'false');
+
+  const historyBox = document.createElement('div');
+  historyBox.id = 'majiang-coach-history-box';
+  historyBox.style.display = 'none';
+
+  const historyContent = document.createElement('div');
+  historyContent.style.whiteSpace = 'pre-line';
+
+  const historyClear = document.createElement('button');
+  historyClear.type = 'button';
+  historyClear.textContent = '履歴を削除';
+  historyClear.className = 'majiang-coach-history-clear';
+  historyBox.append(historyContent, historyClear);
+
+  const hintButton = document.createElement('button');
+  hintButton.id = 'majiang-coach-hint-button';
+  hintButton.type = 'button';
+  hintButton.textContent = '💡 ヒント';
+  hintButton.setAttribute('aria-controls', 'majiang-coach-panel');
+  hintButton.setAttribute('aria-expanded', 'false');
 
   let active = null;
   let tapped = null;
   let marks = [];
   let reviewUntil = 0;
+  let lastReview = null;
+  let hintOpen = false;
+  let historyOpen = false;
+
+  const historyKey = 'majiang_coach_history_v4';
+  let historyItems = [];
+  try {
+    const saved = JSON.parse(localStorage.getItem(historyKey) || '[]');
+    if (Array.isArray(saved)) historyItems = saved.slice(-100);
+  } catch (_) {}
 
   function unmark() {
     for (const m of marks) {
@@ -80,20 +114,34 @@
     return '上位候補の牌効率には大きな差がありません。';
   }
 
-  function showHint() {
-    if (!active) return;
+  function buildHintText() {
+    if (!active || !active.ranks.length) return null;
     const best = active.ranks[0];
     const second = active.ranks[1];
-
-    panel.textContent =
-      '🀄 何切るヒント Ver.3\n' +
+    return '🀄 何切るヒント Ver.3\n' +
       '推奨：' + name(best.cut) + '／次点：' +
       (second ? name(second.cut) : 'なし') + '\n' +
       step(best.shanten) + '・有効牌' + best.types.length +
       '種類・受け入れ上限' + best.upper + '枚\n' +
       '理由：' + reason(best, second) + '\n' +
       '※牌効率のみ。公開牌・守備・打点は未評価';
+  }
 
+  function renderHint() {
+    if (!hintOpen) {
+      panel.style.display = 'none';
+      return;
+    }
+
+    const currentText = buildHintText();
+    const reviewText = lastReview ? lastReview.text : null;
+    if (currentText && reviewText) {
+      panel.textContent = currentText + '\n\n────────\n' +
+        '📝 直前の打牌レビュー\n' + reviewText;
+    } else {
+      panel.textContent = currentText || reviewText ||
+        '🀄 何切るヒント\n現在は表示できる推奨・レビューがありません。';
+    }
     panel.style.display = 'block';
   }
 
@@ -123,7 +171,7 @@
         '牌効率の数値ではほぼ同等の選択です。';
     }
 
-    panel.textContent =
+    const reviewText =
       '📝 打牌後の振り返り Ver.3\n' +
       'あなた：' + name(cut) + '／推奨：' + name(best.cut) + '\n' +
       'あなた：' + step(mine.shanten) + '・上限' + mine.upper + '枚\n' +
@@ -131,143 +179,113 @@
       '解説：' + comment + '\n' +
       '※牌効率の比較であり、打点・守備の採点ではありません。';
 
-    panel.style.display = 'block';
+    lastReview = { text: reviewText, createdAt: Date.now() };
     reviewUntil = Date.now() + 16000;
     recordHistory(mine, best);
+    // 打牌によって閉じていたヒントを勝手に開かない。
+    // 既に自分で開いていた場合だけ、レビュー内容を更新する。
   }
 
-  
-const historyKey = 'majiang_coach_history_v4';
-let historyItems = [];
+  function renderHistory() {
+    const total = historyItems.length;
+    const matched = historyItems.filter(r => r.own === r.best).length;
+    const similar = historyItems.filter(r => r.own !== r.best &&
+      r.stepDiff === 0 && r.upperDiff === 0).length;
 
-try {
-  const saved = JSON.parse(localStorage.getItem(historyKey) || '[]');
-  if (Array.isArray(saved)) historyItems = saved.slice(-100);
-} catch (_) {}
+    const lines = historyItems.slice(-15).reverse().map((r, i) => {
+      const result = r.own === r.best ? '◎ 推奨一致' :
+        r.stepDiff === 0 && r.upperDiff === 0 ? '○ ほぼ同等' : '△ 要復習';
+      return (i + 1) + '. ' + r.own + '切り → ' + result +
+        '（推奨：' + r.best + '）';
+    });
 
-const historyButton = document.createElement('button');
-historyButton.textContent = '📖 打牌履歴';
-historyButton.style.cssText =
-  'position:fixed;right:12px;bottom:70px;z-index:100001;' +
-  'background:#123b32;color:#fff;border:1px solid #8ac5b2;' +
-  'padding:10px 12px;border-radius:18px;font:14px sans-serif;';
-
-const historyBox = document.createElement('div');
-historyBox.style.cssText =
-  'position:fixed;right:12px;bottom:122px;z-index:100001;' +
-  'width:min(350px,88vw);max-height:42vh;overflow:auto;' +
-  'background:#102b27;color:white;padding:12px;border-radius:12px;' +
-  'box-shadow:0 3px 14px #0008;font:13px/1.7 sans-serif;display:none;';
-
-const historyContent = document.createElement('div');
-historyContent.style.whiteSpace = 'pre-line';
-
-const historyClear = document.createElement('button');
-historyClear.textContent = '履歴を削除';
-historyClear.style.cssText =
-  'margin-top:12px;padding:6px;background:transparent;' +
-  'color:white;border:1px solid white;border-radius:6px;';
-
-historyBox.append(historyContent, historyClear);
-
-function renderHistory() {
-  const total = historyItems.length;
-  const matched = historyItems.filter(r => r.own === r.best).length;
-  const similar = historyItems.filter(r => r.own !== r.best &&
-    r.stepDiff === 0 && r.upperDiff === 0).length;
-
-  const lines = historyItems.slice(-15).reverse().map((r, i) => {
-    const result = r.own === r.best ? '◎ 推奨一致' :
-      r.stepDiff === 0 && r.upperDiff === 0 ? '○ ほぼ同等' : '△ 要復習';
-
-    return (i + 1) + '. ' + r.own + '切り → ' + result +
-      '（推奨：' + r.best + '）';
-  });
-
-  historyContent.textContent =
-    '📖 打牌履歴 Ver.4\n' +
-    total + '件記録 / 推奨一致 ' + matched +
-    '件（' + (total ? Math.round(matched / total * 100) : 0) + '%）\n' +
-    '別候補でほぼ同等：' + similar + '件\n\n' +
-    (lines.length ? lines.join('\n') : 'まだ記録がありません。') +
-    '\n\n※直近15件を表示・最大100件を端末内に保存';
-}
-
-function setupHistory() {
-  if (historyButton.isConnected) return;
-  document.body.append(historyButton, historyBox);
-}
-
-historyButton.addEventListener('click', () => {
-  const willOpen = historyBox.style.display === 'none';
-  historyBox.style.display = willOpen ? 'block' : 'none';
-  if (willOpen) renderHistory();
-});
-
-historyClear.addEventListener('click', () => {
-  if (!window.confirm('打牌履歴をすべて削除しますか？')) return;
-  historyItems = [];
-  try { localStorage.removeItem(historyKey); } catch (_) {}
-  renderHistory();
-});
-
-function recordHistory(mine, best) {
-  historyItems.push({
-    own: name(mine.cut),
-    best: name(best.cut),
-    stepDiff: mine.shanten - best.shanten,
-    upperDiff: best.upper - mine.upper
-  });
-
-  historyItems = historyItems.slice(-100);
-
-  try {
-    localStorage.setItem(historyKey, JSON.stringify(historyItems));
-  } catch (err) {
-    console.warn('履歴保存失敗', err);
+    historyContent.textContent =
+      '📖 打牌履歴 Ver.4\n' +
+      total + '件記録 / 推奨一致 ' + matched +
+      '件（' + (total ? Math.round(matched / total * 100) : 0) + '%）\n' +
+      '別候補でほぼ同等：' + similar + '件\n\n' +
+      (lines.length ? lines.join('\n') : 'まだ記録がありません。') +
+      '\n\n※直近15件を表示・最大100件を端末内に保存';
   }
 
-  if (historyBox.style.display === 'block') renderHistory();
-}
+  function recordHistory(mine, best) {
+    historyItems.push({
+      own: name(mine.cut),
+      best: name(best.cut),
+      stepDiff: mine.shanten - best.shanten,
+      upperDiff: best.upper - mine.upper
+    });
+    historyItems = historyItems.slice(-100);
+    try {
+      localStorage.setItem(historyKey, JSON.stringify(historyItems));
+    } catch (err) {
+      console.warn('履歴保存失敗', err);
+    }
+    if (historyOpen) renderHistory();
+  }
+
+  function setHintOpen(open) {
+    hintOpen = open;
+    hintButton.setAttribute('aria-expanded', String(hintOpen));
+    if (hintOpen) setHistoryOpen(false);
+    renderHint();
+  }
+
+  function setHistoryOpen(open) {
+    historyOpen = open;
+    historyButton.setAttribute('aria-expanded', String(historyOpen));
+    if (historyOpen) {
+      hintOpen = false;
+      hintButton.setAttribute('aria-expanded', 'false');
+      panel.style.display = 'none';
+      renderHistory();
+    }
+    historyBox.style.display = historyOpen ? 'block' : 'none';
+  }
+
+  hintButton.addEventListener('click', () => setHintOpen(!hintOpen));
+  historyButton.addEventListener('click', () => setHistoryOpen(!historyOpen));
+  historyClear.addEventListener('click', () => {
+    if (!window.confirm('打牌履歴をすべて削除しますか？')) return;
+    historyItems = [];
+    try { localStorage.removeItem(historyKey); } catch (_) {}
+    renderHistory();
+  });
 
   // 14枚から13枚になったとき、実際に切った牌を調べる。
   function detectDiscard(before, after) {
     if (after.length !== 13) return null;
     const remaining = after.slice();
     const missing = [];
-
     for (const p of before) {
       const i = remaining.indexOf(p);
       if (i < 0) missing.push(p);
       else remaining.splice(i, 1);
     }
-
     return missing.length === 1 && remaining.length === 0
       ? missing[0] : null;
   }
 
-  
-function checkCommitted() {
-  if (!active || !tapped || tapped.key !== active.key) return;
+  function checkCommitted() {
+    if (!active || !tapped || tapped.key !== active.key) return;
+    const el = tapped.element;
+    const confirmed = el && (
+      el.classList.contains('dapai') ||
+      !!el.querySelector('.dapai') ||
+      !el.hasAttribute('role') ||
+      !el.isConnected
+    );
+    const now = getTiles(getHand());
+    const detected = detectDiscard(active.tiles, now);
 
-  const el = tapped.element;
-  const confirmed = el && (
-    el.classList.contains('dapai') ||
-    !!el.querySelector('.dapai') ||
-    !el.hasAttribute('role') ||
-    !el.isConnected
-  );
-
-  const now = getTiles(getHand());
-  const detected = detectDiscard(active.tiles, now);
-
-  if (confirmed || detected === tapped.tile) {
-    showReview(tapped.tile);
-    unmark();
-    active = null;
-    tapped = null;
+    if (confirmed || detected === tapped.tile) {
+      showReview(tapped.tile);
+      unmark();
+      active = null;
+      tapped = null;
+      if (hintOpen) renderHint();
+    }
   }
-}
 
   // iPhoneの1回目のタップは選択のみ。打牌確定後に評価。
   document.addEventListener('click', e => {
@@ -275,22 +293,18 @@ function checkCommitted() {
     const tile = target && target.closest(
       '.shoupai.main .bingpai .pai[data-pai][role="button"]'
     );
-
     if (!tile || !active) return;
-tapped = {
-  tile: tile.dataset.pai,
-  key: active.key,
-  element: tile
-};
-
+    tapped = {
+      tile: tile.dataset.pai,
+      key: active.key,
+      element: tile
+    };
     setTimeout(checkCommitted, 30);
     setTimeout(checkCommitted, 150);
   }, true);
 
   function update() {
     if (!document.body) return;
-    if (!panel.isConnected) document.body.appendChild(panel);
-
     checkCommitted();
     if (Date.now() < reviewUntil) return;
 
@@ -299,7 +313,6 @@ tapped = {
     const choices = hand ? [...hand.querySelectorAll(
       '.pai[role="button"][data-pai]'
     )].map(el => el.dataset.pai) : [];
-
     const valid = tiles.length === 14 && choices.length > 0 &&
       tiles.every(p => /^(?:[mps][0-9]|z[1-7])$/.test(p));
 
@@ -308,14 +321,13 @@ tapped = {
         unmark();
         active = null;
         tapped = null;
+        if (hintOpen) renderHint();
       }
-      if (Date.now() > reviewUntil) panel.style.display = 'none';
       return;
     }
 
     const key = tiles.join('/') + '|' + choices.join('/');
     if (active && key === active.key) return;
-
     unmark();
     tapped = null;
 
@@ -326,11 +338,9 @@ tapped = {
           b.upper - a.upper ||
           b.types.length - a.types.length ||
           Number(a.cut[1] === '0') - Number(b.cut[1] === '0'));
-
       if (!ranks.length) return;
 
       active = { key, tiles: tiles.slice(), ranks };
-
       const elements = [...hand.querySelectorAll('.pai[data-pai]')];
       marks = elements.filter(el => el.dataset.pai === ranks[0].cut)
         .map(el => ({
@@ -338,65 +348,135 @@ tapped = {
           outline: el.style.outline,
           offset: el.style.outlineOffset
         }));
-
       for (const m of marks) {
         m.el.style.outline = '3px solid #ffd54a';
         m.el.style.outlineOffset = '-2px';
       }
-
       reviewUntil = 0;
-      showHint();
-
+      if (hintOpen) renderHint();
     } catch (err) {
       console.warn('Coach v3:', err);
       active = null;
-      panel.style.display = 'none';
+      if (hintOpen) renderHint();
     }
   }
 
-  
-const start = () => {
-  setupHistory();
+  function installStyle() {
+    if (document.getElementById('majiang-coach-style')) return;
+    const style = document.createElement('style');
+    style.id = 'majiang-coach-style';
+    style.textContent = `
+#majiang-coach-panel {
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(8px + env(safe-area-inset-right, 0px));
+  z-index: 99999;
+  box-sizing: border-box;
+  max-width: 82vw;
+  max-height: 60vh;
+  max-height: 60dvh;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #102b27;
+  color: white;
+  font: 13px/1.5 sans-serif;
+  white-space: pre-line;
+  box-shadow: 0 3px 14px #0008;
+  pointer-events: auto;
+}
+#majiang-coach-history-box {
+  position: fixed;
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  bottom: calc(90px + env(safe-area-inset-bottom, 0px));
+  z-index: 100001;
+  box-sizing: border-box;
+  width: min(340px, calc(100vw - 24px));
+  max-height: 45vh;
+  max-height: 45dvh;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 12px;
+  background: #102b27;
+  color: white;
+  box-shadow: 0 3px 14px #0008;
+  font: 13px/1.7 sans-serif;
+}
+#majiang-coach-history-button,
+#majiang-coach-hint-button {
+  position: fixed;
+  z-index: 100002;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #8ac5b2;
+  border-radius: 18px;
+  background: #123b32;
+  color: #fff;
+  font: 12px/1.3 sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#majiang-coach-history-button {
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  top: calc(160px + env(safe-area-inset-top, 0px));
+}
+#majiang-coach-hint-button {
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.majiang-coach-history-clear {
+  margin-top: 12px;
+  padding: 6px;
+  border: 1px solid white;
+  border-radius: 6px;
+  background: transparent;
+  color: white;
+}
+@media (orientation: landscape) {
+  #majiang-coach-panel {
+    top: calc(10px + env(safe-area-inset-top, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+    max-width: 36vw;
+    max-height: 72vh;
+    max-height: 72dvh;
+    font-size: 12px;
+  }
+  #majiang-coach-history-box {
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    bottom: calc(48px + env(safe-area-inset-bottom, 0px));
+    width: min(340px, 36vw);
+    max-height: 65vh;
+    max-height: 65dvh;
+  }
+  #majiang-coach-history-button {
+    top: auto;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  #majiang-coach-hint-button {
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+}
+`;
+    document.head.appendChild(style);
+  }
 
-  
-  // Ver.4.1 スマホ向け配置
-  historyButton.style.cssText +=
-    'top:160px!important;left:12px!important;' +
-    'right:auto!important;bottom:auto!important;' +
-    'width:112px!important;max-width:112px!important;' +
-    'min-width:0!important;display:block!important;' +
-    'box-sizing:border-box!important;' +
-    'padding:8px 6px!important;' +
-    'font-size:12px!important;' +
-    'white-space:nowrap!important;';
+  function start() {
+    installStyle();
+    if (!historyButton.isConnected) document.body.appendChild(historyButton);
+    if (!historyBox.isConnected) document.body.appendChild(historyBox);
+    if (!hintButton.isConnected) document.body.appendChild(hintButton);
+    if (!panel.isConnected) document.body.appendChild(panel);
 
-  historyBox.style.cssText +=
-    'top:auto!important;bottom:90px!important;' +
-    'left:12px!important;right:auto!important;' +
-    'width:min(340px,calc(100vw - 24px))!important;' +
-    'max-height:45vh!important;' +
-    'box-sizing:border-box!important;' +
-    'overflow-y:auto!important;';
-
-  
-historyButton.textContent = '📖 履歴 4.1';
-historyButton.style.setProperty('width', '112px', 'important');
-historyButton.style.setProperty('min-width', '112px', 'important');
-historyButton.style.setProperty('max-width', '112px', 'important');
-historyButton.style.setProperty('flex', 'none', 'important');
-
-  setInterval(update, 150);
-
-
+    update();
+    setInterval(update, 150);
     const observer = new MutationObserver(() => {
       if (tapped) checkCommitted();
     });
-
     const hand = document.querySelector('.shoupai.main');
-    if (hand) {
-      observer.observe(hand, { childList: true, subtree: true });
-    }
-  };
+    if (hand) observer.observe(hand, { childList: true, subtree: true });
+  }
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start, { once: true });

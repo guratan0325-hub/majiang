@@ -358,11 +358,25 @@ tapped = {
 const start = () => {
   setupHistory();
 
+  
+  // Ver.4.1 スマホ向け配置
   historyButton.style.cssText +=
-    'top:160px;left:12px;bottom:auto;right:auto;';
+    'top:160px!important;left:12px!important;' +
+    'right:auto!important;bottom:auto!important;' +
+    'width:112px!important;max-width:112px!important;' +
+    'min-width:0!important;display:block!important;' +
+    'box-sizing:border-box!important;' +
+    'padding:8px 6px!important;' +
+    'font-size:12px!important;' +
+    'white-space:nowrap!important;';
 
   historyBox.style.cssText +=
-    'top:205px;left:12px;bottom:auto;right:auto;';
+    'top:auto!important;bottom:90px!important;' +
+    'left:12px!important;right:auto!important;' +
+    'width:min(340px,calc(100vw - 24px))!important;' +
+    'max-height:45vh!important;' +
+    'box-sizing:border-box!important;' +
+    'overflow-y:auto!important;';
 
   setInterval(update, 150);
 

@@ -354,9 +354,18 @@ tapped = {
     }
   }
 
-  const start = () => {
-    setupHistory();
-    setInterval(update, 150);
+  
+const start = () => {
+  setupHistory();
+
+  historyButton.style.cssText +=
+    'top:160px;left:12px;bottom:auto;right:auto;';
+
+  historyBox.style.cssText +=
+    'top:205px;left:12px;bottom:auto;right:auto;';
+
+  setInterval(update, 150);
+
 
     const observer = new MutationObserver(() => {
       if (tapped) checkCommitted();

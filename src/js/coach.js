@@ -133,7 +133,102 @@
 
     panel.style.display = 'block';
     reviewUntil = Date.now() + 16000;
+    recordHistory(mine, best);
   }
+
+  
+const historyKey = 'majiang_coach_history_v4';
+let historyItems = [];
+
+try {
+  const saved = JSON.parse(localStorage.getItem(historyKey) || '[]');
+  if (Array.isArray(saved)) historyItems = saved.slice(-100);
+} catch (_) {}
+
+const historyButton = document.createElement('button');
+historyButton.textContent = '📖 打牌履歴';
+historyButton.style.cssText =
+  'position:fixed;right:12px;bottom:70px;z-index:100001;' +
+  'background:#123b32;color:#fff;border:1px solid #8ac5b2;' +
+  'padding:10px 12px;border-radius:18px;font:14px sans-serif;';
+
+const historyBox = document.createElement('div');
+historyBox.style.cssText =
+  'position:fixed;right:12px;bottom:122px;z-index:100001;' +
+  'width:min(350px,88vw);max-height:42vh;overflow:auto;' +
+  'background:#102b27;color:white;padding:12px;border-radius:12px;' +
+  'box-shadow:0 3px 14px #0008;font:13px/1.7 sans-serif;display:none;';
+
+const historyContent = document.createElement('div');
+historyContent.style.whiteSpace = 'pre-line';
+
+const historyClear = document.createElement('button');
+historyClear.textContent = '履歴を削除';
+historyClear.style.cssText =
+  'margin-top:12px;padding:6px;background:transparent;' +
+  'color:white;border:1px solid white;border-radius:6px;';
+
+historyBox.append(historyContent, historyClear);
+
+function renderHistory() {
+  const total = historyItems.length;
+  const matched = historyItems.filter(r => r.own === r.best).length;
+  const similar = historyItems.filter(r => r.own !== r.best &&
+    r.stepDiff === 0 && r.upperDiff === 0).length;
+
+  const lines = historyItems.slice(-15).reverse().map((r, i) => {
+    const result = r.own === r.best ? '◎ 推奨一致' :
+      r.stepDiff === 0 && r.upperDiff === 0 ? '○ ほぼ同等' : '△ 要復習';
+
+    return (i + 1) + '. ' + r.own + '切り → ' + result +
+      '（推奨：' + r.best + '）';
+  });
+
+  historyContent.textContent =
+    '📖 打牌履歴 Ver.4\n' +
+    total + '件記録 / 推奨一致 ' + matched +
+    '件（' + (total ? Math.round(matched / total * 100) : 0) + '%）\n' +
+    '別候補でほぼ同等：' + similar + '件\n\n' +
+    (lines.length ? lines.join('\n') : 'まだ記録がありません。') +
+    '\n\n※直近15件を表示・最大100件を端末内に保存';
+}
+
+function setupHistory() {
+  if (historyButton.isConnected) return;
+  document.body.append(historyButton, historyBox);
+}
+
+historyButton.addEventListener('click', () => {
+  const willOpen = historyBox.style.display === 'none';
+  historyBox.style.display = willOpen ? 'block' : 'none';
+  if (willOpen) renderHistory();
+});
+
+historyClear.addEventListener('click', () => {
+  if (!window.confirm('打牌履歴をすべて削除しますか？')) return;
+  historyItems = [];
+  try { localStorage.removeItem(historyKey); } catch (_) {}
+  renderHistory();
+});
+
+function recordHistory(mine, best) {
+  historyItems.push({
+    own: name(mine.cut),
+    best: name(best.cut),
+    stepDiff: mine.shanten - best.shanten,
+    upperDiff: best.upper - mine.upper
+  });
+
+  historyItems = historyItems.slice(-100);
+
+  try {
+    localStorage.setItem(historyKey, JSON.stringify(historyItems));
+  } catch (err) {
+    console.warn('履歴保存失敗', err);
+  }
+
+  if (historyBox.style.display === 'block') renderHistory();
+}
 
   // 14枚から13枚になったとき、実際に切った牌を調べる。
   function detectDiscard(before, after) {
@@ -260,6 +355,7 @@ tapped = {
   }
 
   const start = () => {
+    setupHistory();
     setInterval(update, 150);
 
     const observer = new MutationObserver(() => {

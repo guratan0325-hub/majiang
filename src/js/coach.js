@@ -378,6 +378,13 @@ const start = () => {
     'box-sizing:border-box!important;' +
     'overflow-y:auto!important;';
 
+  
+historyButton.textContent = '📖 履歴 4.1';
+historyButton.style.setProperty('width', '112px', 'important');
+historyButton.style.setProperty('min-width', '112px', 'important');
+historyButton.style.setProperty('max-width', '112px', 'important');
+historyButton.style.setProperty('flex', 'none', 'important');
+
   setInterval(update, 150);
 
 

@@ -12,3 +12,4 @@ global.Majiang.UI = require('@kobalab/majiang-ui');
 global.Majiang.VERSION = '2.5.4';
 global.jQuery  = require('jquery');
 global.$ = jQuery;
+require('./coach');

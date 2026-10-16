@@ -832,4 +832,279 @@
   } else {
     start();
   }
+  
+  // --- 役・ドラ補助評価 Ver.4（試験版） ---
+  const originalBestRank = bestRank;
+  const originalSecondRank = secondRank;
+  const originalBuildHintText = buildHintText;
+  const originalShowReview = showReview;
+
+  // ドラ表示牌から実際のドラを求める
+  function indicatorToDora(indicator) {
+    const p = normal(indicator);
+    const suit = p[0];
+    const number = Number(p[1]);
+
+    if (suit === 'z') {
+      if (number >= 1 && number <= 4) {
+        return 'z' + (number === 4 ? 1 : number + 1);
+      }
+      if (number >= 5 && number <= 7) {
+        return 'z' + (number === 7 ? 5 : number + 1);
+      }
+      return null;
+    }
+
+    if ('mps'.includes(suit) &&
+        number >= 1 && number <= 9) {
+      return suit + (number === 9 ? 1 : number + 1);
+    }
+    return null;
+  }
+
+  function visibleDoraTypes() {
+    const root =
+      document.querySelector('#board .board') ||
+      document.querySelector('#board') ||
+      document;
+
+    return [...root.querySelectorAll(
+      '.shan .baopai .pai[data-pai]'
+    )]
+      .filter(el => el.getClientRects().length > 0)
+      .map(el => indicatorToDora(el.dataset.pai || ''))
+      .filter(Boolean);
+  }
+
+  // 候補を切った後のドラ・役の狙いやすさ
+  function scoreYakuDora(position, cut, doraTypes) {
+    const rest = position.tiles.slice();
+    const index = rest.indexOf(cut);
+    if (index < 0) {
+      return { score: 0, notes: [] };
+    }
+
+    rest.splice(index, 1);
+
+    const counts = Object.create(null);
+    const suitCounts = { m: 0, p: 0, s: 0 };
+    let terminalHonors = 0;
+    let honorCount = 0;
+    let akaCount = 0;
+
+    for (const raw of rest) {
+      const p = normal(raw);
+      counts[p] = (counts[p] || 0) + 1;
+
+      if (raw[1] === '0') akaCount++;
+
+      if (p[0] === 'z') {
+        terminalHonors++;
+        honorCount++;
+      } else {
+        suitCounts[p[0]]++;
+        if (p[1] === '1' || p[1] === '9') {
+          terminalHonors++;
+        }
+      }
+    }
+
+    const doraCount = doraTypes.reduce(
+      (sum, p) => sum + (counts[p] || 0),
+      0
+    );
+
+    let score = doraCount + akaCount;
+    const notes = [];
+
+    if (doraTypes.length) {
+      notes.push(
+        'ドラ' + doraCount + '枚（表示牌から判定）'
+      );
+    } else {
+      notes.push('ドラ表示牌は未確認');
+    }
+
+    if (akaCount) {
+      notes.push('赤ドラ' + akaCount + '枚');
+    }
+
+    // タンヤオを狙いやすい形
+    if (terminalHonors <= 3) {
+      score += (4 - terminalHonors) * 0.25;
+      notes.push('タンヤオ形に近い');
+    }
+
+    // 三元牌の対子・刻子
+    // 自風・場風はまだ判定しない
+    const dragonPairs = ['z5', 'z6', 'z7']
+      .filter(p => (counts[p] || 0) >= 2)
+      .length;
+
+    if (dragonPairs) {
+      score += dragonPairs * 0.45;
+      notes.push('三元牌の対子・刻子あり');
+    }
+
+    // ホンイツ・チンイツの傾向
+    const maxSuit = Math.max(
+      suitCounts.m,
+      suitCounts.p,
+      suitCounts.s
+    );
+
+    const otherSuits =
+      13 - honorCount - maxSuit;
+
+    if (maxSuit >= 9 && otherSuits <= 2) {
+      score += (maxSuit - 8) * 0.18;
+      notes.push(
+        honorCount
+          ? 'ホンイツ候補'
+          : 'チンイツ候補'
+      );
+    }
+
+    return { score, notes };
+  }
+
+  function yakuAdjustedCandidates(position) {
+    if (!position ||
+        !position.ranks ||
+        !position.ranks.length) {
+      return [];
+    }
+
+    const ahead =
+      position.lookahead && position.lookahead.length
+        ? position.lookahead.map(item => ({
+            rank: item.rank,
+            shanten: item.avgShanten,
+            upper: item.avgUpper
+          }))
+        : position.ranks
+            .filter(r =>
+              r.shanten === position.ranks[0].shanten
+            )
+            .slice(0, 4)
+            .map(r => ({
+              rank: r,
+              shanten: r.shanten,
+              upper: r.upper
+            }));
+
+    if (!ahead.length) return [];
+
+    const doraTypes = visibleDoraTypes();
+
+    const enriched = ahead.map((item, i) => ({
+      ...item,
+      i,
+      bonus: scoreYakuDora(
+        position,
+        item.rank.cut,
+        doraTypes
+      )
+    }));
+
+    const reference = enriched[0];
+
+    // 2手読みの評価が近い候補だけ
+    // 役・ドラで順位を入れ替える
+    const near = enriched.filter(item =>
+      item.shanten <= reference.shanten + 0.03 &&
+      item.upper >= reference.upper - 4
+    );
+
+    const other = enriched.filter(
+      item => !near.includes(item)
+    );
+
+    near.sort(
+      (a, b) =>
+        b.bonus.score - a.bonus.score ||
+        a.i - b.i
+    );
+
+    return [...near, ...other];
+  }
+
+  // 従来の推奨に役・ドラ評価を補助的に追加
+  bestRank = function (position) {
+    if (!position ||
+        !position.ranks ||
+        !position.ranks.length) {
+      return originalBestRank(position);
+    }
+
+    if (position.lookaheadStatus &&
+        position.lookaheadStatus.includes('鳴き手')) {
+      return originalBestRank(position);
+    }
+
+    const ranks = yakuAdjustedCandidates(position);
+
+    return ranks.length
+      ? ranks[0].rank
+      : originalBestRank(position);
+  };
+
+  secondRank = function (position) {
+    if (!position ||
+        !position.ranks ||
+        !position.ranks.length ||
+        (position.lookaheadStatus &&
+         position.lookaheadStatus.includes('鳴き手'))) {
+      return originalSecondRank(position);
+    }
+
+    const ranks = yakuAdjustedCandidates(position);
+
+    return ranks.length > 1
+      ? ranks[1].rank
+      : originalSecondRank(position);
+  };
+
+  // ヒントに役・ドラの補助評価を表示
+  buildHintText = function () {
+    const text = originalBuildHintText();
+
+    if (!text || !active || !active.ranks.length) {
+      return text;
+    }
+
+    if (active.lookaheadStatus &&
+        active.lookaheadStatus.includes('鳴き手')) {
+      return text + '\n打点傾向：鳴き手は未対応';
+    }
+
+    const best = bestRank(active);
+
+    const bonus = scoreYakuDora(
+      active,
+      best.cut,
+      visibleDoraTypes()
+    );
+
+    return text +
+      '\n【役・ドラ補助評価（試験版）】\n' +
+      bonus.notes.join('／') + '\n' +
+      '※近い牌効率の候補だけで加味。' +
+      '点数期待値ではありません。';
+  };
+
+  showReview = function (cut) {
+    const previousReview = lastReview;
+    originalShowReview(cut);
+
+    if (lastReview &&
+        lastReview !== previousReview) {
+      lastReview.text +=
+        '\n※推奨にはドラ・役の傾向による' +
+        '補助評価が含まれます。';
+    }
+  };
+
+  // --- 追加ここまで ---
+
 })();

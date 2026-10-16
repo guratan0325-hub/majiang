@@ -1,17 +1,20 @@
 
 'use strict';
 
-// 電脳麻将・牌効率コーチ
-// 可視牌補正版（試験用）
+// 電脳麻将・牌効率コーチ（公開牌補正 + 2手読み）
+// 2手読み = 今の打牌 → 次のツモ → 次の打牌を評価。
 (function () {
   const suits = { m: '萬', p: '筒', s: '索' };
   const honors = ['', '東', '南', '西', '北', '白', '發', '中'];
-
   const normal = p => p[0] + (p[1] === '0' ? '5' : p[1]);
-
-  const name = p => p[0] === 'z'
-    ? honors[Number(p[1])]
+  const name = p => p[0] === 'z' ? honors[Number(p[1])]
     : (p[1] === '0' ? '赤5' : p[1]) + suits[p[0]];
+
+  const allTypes = [];
+  for (const suit of ['m', 'p', 's']) {
+    for (let n = 1; n <= 9; n++) allTypes.push(suit + n);
+  }
+  for (let n = 1; n <= 7; n++) allTypes.push('z' + n);
 
   const panel = document.createElement('div');
   panel.id = 'majiang-coach-panel';
@@ -21,25 +24,24 @@
   historyButton.id = 'majiang-coach-history-button';
   historyButton.type = 'button';
   historyButton.textContent = '📖 履歴 4.1';
+  historyButton.setAttribute('aria-expanded', 'false');
 
   const historyBox = document.createElement('div');
   historyBox.id = 'majiang-coach-history-box';
   historyBox.style.display = 'none';
-
   const historyContent = document.createElement('div');
   historyContent.style.whiteSpace = 'pre-line';
-
   const historyClear = document.createElement('button');
   historyClear.type = 'button';
   historyClear.textContent = '履歴を削除';
   historyClear.className = 'majiang-coach-history-clear';
-
   historyBox.append(historyContent, historyClear);
 
   const hintButton = document.createElement('button');
   hintButton.id = 'majiang-coach-hint-button';
   hintButton.type = 'button';
   hintButton.textContent = '💡 ヒント';
+  hintButton.setAttribute('aria-expanded', 'false');
 
   let active = null;
   let tapped = null;
@@ -48,17 +50,13 @@
   let lastReview = null;
   let hintOpen = false;
   let historyOpen = false;
+  let lookaheadSerial = 0;
 
   const historyKey = 'majiang_coach_history_v4';
   let historyItems = [];
-
   try {
-    const saved = JSON.parse(
-      localStorage.getItem(historyKey) || '[]'
-    );
-    if (Array.isArray(saved)) {
-      historyItems = saved.slice(-100);
-    }
+    const saved = JSON.parse(localStorage.getItem(historyKey) || '[]');
+    if (Array.isArray(saved)) historyItems = saved.slice(-100);
   } catch (_) {}
 
   function unmark() {
@@ -70,87 +68,50 @@
   }
 
   function getHand() {
-    return [
-      ...document.querySelectorAll(
-        '.shoupai.main .bingpai'
-      )
-    ].find(el => el.querySelector('.pai[data-pai]')) || null;
+    return [...document.querySelectorAll('.shoupai.main .bingpai')]
+      .find(el => el.querySelector('.pai[data-pai]')) || null;
   }
 
   function getTiles(hand) {
-    return hand
-      ? [...hand.querySelectorAll('.pai[data-pai]')]
-          .map(el => el.dataset.pai)
-      : [];
+    return hand ? [...hand.querySelectorAll('.pai[data-pai]')]
+      .map(el => el.dataset.pai) : [];
   }
 
-  // 河・副露・ドラ表示牌のうち、
-  // 実際に画面から取得できたものを読み取る。
   function readPublicTiles() {
-    const root =
-      document.querySelector('#board .board') ||
+    const root = document.querySelector('#board .board') ||
       document.querySelector('#board');
-
-    const result = {
-      tiles: [],
-      river: 0,
-      meld: 0,
-      dora: 0
-    };
-
+    const result = { tiles: [], river: 0, meld: 0, dora: 0 };
     if (!root) return result;
-
     const groups = [
       ['river', '.he .pai[data-pai]'],
       ['meld', '.shoupai .fulou .pai[data-pai]'],
       ['dora', '.shan .baopai .pai[data-pai]']
     ];
-
     const seen = new Set();
-
     for (const [group, selector] of groups) {
       for (const el of root.querySelectorAll(selector)) {
         if (seen.has(el)) continue;
         seen.add(el);
-
-        // 非表示の牌は除外
         if (!el.getClientRects().length) continue;
-
         const p = el.dataset.pai;
-
-        if (!/^(?:[mps][0-9]|z[1-7])$/.test(p || '')) {
-          continue;
-        }
-
-        // 赤5と通常5は同じ牌種として数える
+        if (!/^(?:[mps][0-9]|z[1-7])$/.test(p || '')) continue;
         result.tiles.push(normal(p));
         result[group]++;
       }
     }
-
     return result;
   }
 
-  // 自分の手牌と公開牌の枚数表
   function makeKnownCounts(tiles, publicInfo) {
     const handCounts = Object.create(null);
     const counts = Object.create(null);
-
     for (const p of tiles) {
       const key = normal(p);
       handCounts[key] = (handCounts[key] || 0) + 1;
       counts[key] = (counts[key] || 0) + 1;
     }
-
-    for (const p of publicInfo.tiles) {
-      counts[p] = (counts[p] || 0) + 1;
-    }
-
-    // 同種5枚以上ならDOMの重複取得が疑われる。
-    // 安全のため公開牌補正を一旦無効にする。
-    const invalid = Object.values(counts)
-      .some(n => n > 4);
-
+    for (const p of publicInfo.tiles) counts[p] = (counts[p] || 0) + 1;
+    const invalid = Object.values(counts).some(n => n > 4);
     return {
       counts: invalid ? handCounts : counts,
       publicCount: invalid ? 0 : publicInfo.tiles.length,
@@ -158,37 +119,168 @@
     };
   }
 
+  // 14枚の手牌から1枚切ったときの13枚形を評価する。
   function analyze(tiles, cut, knownCounts) {
     const rest = tiles.slice();
     const index = rest.indexOf(cut);
-
     if (index < 0) return null;
     rest.splice(index, 1);
-
-    const str = ['m', 'p', 's', 'z']
-      .map(s => s + rest
-        .filter(p => p[0] === s)
-        .map(p => p[1]).join('')
-      ).join('');
-
+    const str = ['m', 'p', 's', 'z'].map(s => s + rest
+      .filter(p => p[0] === s).map(p => p[1]).join('')).join('');
     const hand = Majiang.Shoupai.fromString(str);
     const shanten = Majiang.Util.xiangting(hand);
-
-    const types = [
-      ...new Set(
-        (Majiang.Util.tingpai(hand) || []).map(normal)
-      )
-    ];
-
-    // 取得できた公開牌を引いた暫定受け入れ上限
-    const upper = types.reduce(
-      (n, p) => n + Math.max(
-        0, 4 - (knownCounts[p] || 0)
-      ),
-      0
-    );
-
+    const types = [...new Set((Majiang.Util.tingpai(hand) || [])
+      .map(normal))];
+    const upper = types.reduce((sum, p) => sum +
+      Math.max(0, 4 - (knownCounts[p] || 0)), 0);
     return { cut, shanten, types, upper };
+  }
+
+  function compareRank(a, b) {
+    return a.shanten - b.shanten || b.upper - a.upper ||
+      b.types.length - a.types.length ||
+      Number(a.cut[1] === '0') - Number(b.cut[1] === '0');
+  }
+
+  // 先読み計算：次に引き得る牌と、その直後の打牌を評価。
+  function startLookahead(position, knownCounts) {
+    const serial = ++lookaheadSerial;
+    const shortlist = position.ranks
+      .filter(r => r.shanten === position.ranks[0].shanten)
+      .slice(0, 4);
+    const jobs = [];
+    const stats = new Map();
+    const totalUnknown = allTypes.reduce((sum, p) =>
+      sum + Math.max(0, 4 - (knownCounts[p] || 0)), 0);
+
+    if (!totalUnknown || !shortlist.length) {
+      position.lookaheadStatus = '先読み対象の牌がありません';
+      return;
+    }
+
+    for (const rank of shortlist) {
+      stats.set(rank.cut, {
+        rank,
+        weightedShanten: 0,
+        weightedUpper: 0,
+        weight: 0
+      });
+      for (const draw of allTypes) {
+        const count = Math.max(0, 4 - (knownCounts[draw] || 0));
+        if (count > 0) jobs.push({ rank, draw, count });
+      }
+    }
+
+    let next = 0;
+    const runChunk = () => {
+      if (serial !== lookaheadSerial || active !== position) return;
+      const started = performance.now();
+      let processed = 0;
+
+      try {
+        // 各チャンクで最大2ツモ分、最大約8msを目安に処理。
+        while (
+          next < jobs.length &&
+          processed < 2 &&
+          (performance.now() - started) < 8
+        ) {
+          const { rank, draw, count } = jobs[next++];
+          const rest = position.tiles.slice();
+          rest.splice(rest.indexOf(rank.cut), 1);
+          rest.push(draw);
+
+          const futureCounts = Object.assign({}, knownCounts);
+          futureCounts[draw] = (futureCounts[draw] || 0) + 1;
+
+          const nextRanks = [...new Set(rest)]
+            .map(cut => analyze(rest, cut, futureCounts))
+            .filter(Boolean)
+            .sort(compareRank);
+
+          if (nextRanks.length) {
+            const best = nextRanks[0];
+            const item = stats.get(rank.cut);
+            item.weightedShanten += best.shanten * count;
+            item.weightedUpper += best.upper * count;
+            item.weight += count;
+          }
+          processed++;
+        }
+      } catch (err) {
+        console.warn('2手読み計算:', err);
+        position.lookaheadStatus =
+          '先読み失敗（従来の牌効率を使用）';
+        if (hintOpen) renderHint();
+        return;
+      }
+
+      if (next < jobs.length) {
+        setTimeout(runChunk, 0);
+        return;
+      }
+
+      const evaluated = [...stats.values()]
+        .filter(item => item.weight > 0)
+        .map(item => ({
+          ...item,
+          avgShanten: item.weightedShanten / item.weight,
+          avgUpper: item.weightedUpper / item.weight
+        }))
+        .sort((a, b) =>
+          a.avgShanten - b.avgShanten ||
+          b.avgUpper - a.avgUpper ||
+          compareRank(a.rank, b.rank)
+        );
+
+      if (serial !== lookaheadSerial || active !== position) return;
+
+      position.lookahead = evaluated;
+      position.lookaheadStatus = evaluated.length
+        ? '先読み完了（上位' + evaluated.length + '候補）'
+        : '先読み候補なし';
+
+      updateMarks(position);
+      if (hintOpen) renderHint();
+    };
+
+    setTimeout(runChunk, 0);
+  }
+
+  function bestRank(position) {
+    return position.lookahead && position.lookahead.length
+      ? position.lookahead[0].rank
+      : position.ranks[0];
+  }
+
+  function secondRank(position) {
+    return position.lookahead && position.lookahead.length > 1
+      ? position.lookahead[1].rank
+      : position.ranks.find(
+        r => r.cut !== bestRank(position).cut
+      );
+  }
+
+  function updateMarks(position) {
+    if (active !== position) return;
+    unmark();
+
+    const hand = getHand();
+    if (!hand) return;
+    const best = bestRank(position);
+    if (!best) return;
+
+    marks = [...hand.querySelectorAll('.pai[data-pai]')]
+      .filter(el => el.dataset.pai === best.cut)
+      .map(el => ({
+        el,
+        outline: el.style.outline,
+        offset: el.style.outlineOffset
+      }));
+
+    for (const m of marks) {
+      m.el.style.outline = '3px solid #ffd54a';
+      m.el.style.outlineOffset = '-2px';
+    }
   }
 
   function step(n) {
@@ -198,34 +290,35 @@
   }
 
   function reason(best, second) {
-    if (!second) {
-      return '比較できる別候補がありません。';
-    }
-
+    if (!second) return '比較できる別候補がありません。';
     if (best.shanten < second.shanten) {
       return '次点よりシャンテン数が少なく、和了に近づきます。';
     }
-
     if (best.upper > second.upper) {
-      return '次点より受け入れ上限が' +
-        (best.upper - second.upper) +
-        '枚多くなります。';
+      return '受け入れ上限が次点より' +
+        (best.upper - second.upper) + '枚多くなります。';
     }
-
     if (best.types.length > second.types.length) {
       return '次点より有効牌の種類が多くなります。';
     }
-
-    return '上位候補の牌効率には大きな差がありません。';
+    return '直近の牌効率は近いため、次のツモ後の形も比較します。';
   }
 
   function buildHintText() {
     if (!active || !active.ranks.length) return null;
 
-    const best = active.ranks[0];
-    const second = active.ranks[1];
+    const best = bestRank(active);
+    const second = secondRank(active);
+    const note = active.lookahead && active.lookahead.length
+      ? '2手読み：次のツモ後の最善打牌まで比較済み\n' +
+        '平均次巡シャンテン：' +
+        active.lookahead[0].avgShanten.toFixed(2) +
+        '／次巡の平均受け入れ上限：' +
+        active.lookahead[0].avgUpper.toFixed(1) + '枚\n' +
+        '※同シャンテンの上位候補で比較・推定値'
+      : '2手読み：' + active.lookaheadStatus;
 
-    return '🀄 何切るヒント Ver.3\n' +
+    return '🀄 何切るヒント（2手読み）\n' +
       '推奨：' + name(best.cut) +
       '／次点：' +
       (second ? name(second.cut) : 'なし') + '\n' +
@@ -233,9 +326,9 @@
       '・有効牌' + best.types.length +
       '種類・受け入れ上限' + best.upper + '枚\n' +
       '理由：' + reason(best, second) + '\n' +
-      '受け入れ枚数：' +
-      active.publicStatus + '\n' +
-      '※暫定上限。未確認の牌・打点・守備は未評価';
+      note + '\n' +
+      '公開牌補正：' + active.publicStatus + '\n' +
+      '※牌効率のみ。打点・守備・相手の隠し牌は未評価';
   }
 
   function renderHint() {
@@ -245,22 +338,17 @@
     }
 
     const currentText = buildHintText();
-    const reviewText = lastReview
-      ? lastReview.text
-      : null;
+    const reviewText = lastReview ? lastReview.text : null;
 
-    if (currentText && reviewText) {
-      panel.textContent =
-        currentText + '\n\n────────\n' +
-        '📝 直前の打牌レビュー\n' +
-        reviewText;
-    } else {
-      panel.textContent =
+    panel.textContent = currentText && reviewText
+      ? currentText +
+        '\n\n────────\n📝 直前の打牌レビュー\n' +
+        reviewText
+      : (
         currentText ||
         reviewText ||
-        '🀄 何切るヒント\n' +
-        '現在は表示できる推奨・レビューがありません。';
-    }
+        '現在は表示できる推奨・レビューがありません。'
+      );
 
     panel.style.display = 'block';
   }
@@ -268,51 +356,34 @@
   function showReview(cut) {
     if (!active) return;
 
-    const ranks = active.ranks;
-    const best = ranks[0];
-    const mine = ranks.find(r => r.cut === cut);
-
-    if (!mine) return;
+    const best = bestRank(active);
+    const mine = active.ranks.find(r => r.cut === cut);
+    if (!mine || !best) return;
 
     let comment;
 
     if (mine.cut === best.cut) {
-      comment =
-        '第一候補と一致！ 牌効率では良い選択です。';
+      comment = '第一候補と一致！ 牌効率では良い選択です。';
     } else if (mine.shanten > best.shanten) {
-      comment =
-        '第一候補よりシャンテン数が' +
-        (mine.shanten - best.shanten) +
-        '大きくなり、和了まで遠回りになりやすい選択です。';
+      comment = '第一候補よりシャンテン数が' +
+        (mine.shanten - best.shanten) + '大きくなります。';
     } else if (mine.upper < best.upper) {
-      comment =
-        '第一候補と同じシャンテン数ですが、' +
-        '受け入れ上限が' +
-        (best.upper - mine.upper) +
-        '枚少ない選択です。';
-    } else if (mine.types.length < best.types.length) {
-      comment =
-        '受け入れ上限は同じですが、' +
-        '有効牌の種類が少ない選択です。';
+      comment = '第一候補より受け入れ上限が' +
+        (best.upper - mine.upper) + '枚少ない選択です。';
     } else {
       comment =
-        '第一候補とは違いますが、' +
-        '牌効率の数値ではほぼ同等の選択です。';
+        '現在の牌効率は近い候補です。将来の形も参考にしてください。';
     }
 
-    const reviewText =
-      '📝 打牌後の振り返り Ver.3\n' +
-      'あなた：' + name(cut) +
-      '／推奨：' + name(best.cut) + '\n' +
-      'あなた：' + step(mine.shanten) +
-      '・上限' + mine.upper + '枚\n' +
-      '推奨：' + step(best.shanten) +
-      '・上限' + best.upper + '枚\n' +
-      '解説：' + comment + '\n' +
-      '※牌効率の比較であり、打点・守備の採点ではありません。';
-
     lastReview = {
-      text: reviewText,
+      text: '📝 打牌後の振り返り\n' +
+        'あなた：' + name(cut) +
+        '／推奨：' + name(best.cut) + '\n' +
+        'あなた：' + step(mine.shanten) +
+        '・上限' + mine.upper + '枚\n' +
+        '推奨：' + step(best.shanten) +
+        '・上限' + best.upper + '枚\n' +
+        '解説：' + comment,
       createdAt: Date.now()
     };
 
@@ -322,7 +393,6 @@
 
   function renderHistory() {
     const total = historyItems.length;
-
     const matched = historyItems.filter(
       r => r.own === r.best
     ).length;
@@ -343,8 +413,7 @@
             : '△ 要復習';
 
         return (i + 1) + '. ' +
-          r.own + '切り → ' +
-          result +
+          r.own + '切り → ' + result +
           '（推奨：' + r.best + '）';
       });
 
@@ -356,9 +425,11 @@
       '%）\n' +
       '別候補でほぼ同等：' +
       similar + '件\n\n' +
-      (lines.length
-        ? lines.join('\n')
-        : 'まだ記録がありません。') +
+      (
+        lines.length
+          ? lines.join('\n')
+          : 'まだ記録がありません。'
+      ) +
       '\n\n※直近15件を表示・最大100件を端末内に保存';
   }
 
@@ -386,9 +457,9 @@
 
   function setHintOpen(open) {
     hintOpen = open;
-
     hintButton.setAttribute(
-      'aria-expanded', String(hintOpen)
+      'aria-expanded',
+      String(hintOpen)
     );
 
     if (hintOpen) setHistoryOpen(false);
@@ -397,18 +468,14 @@
 
   function setHistoryOpen(open) {
     historyOpen = open;
-
     historyButton.setAttribute(
-      'aria-expanded', String(historyOpen)
+      'aria-expanded',
+      String(historyOpen)
     );
 
     if (historyOpen) {
       hintOpen = false;
-
-      hintButton.setAttribute(
-        'aria-expanded', 'false'
-      );
-
+      hintButton.setAttribute('aria-expanded', 'false');
       panel.style.display = 'none';
       renderHistory();
     }
@@ -481,18 +548,17 @@
       showReview(tapped.tile);
       unmark();
       active = null;
+      ++lookaheadSerial;
       tapped = null;
 
       if (hintOpen) renderHint();
     }
   }
 
-  // 打牌確定を検出
   document.addEventListener('click', e => {
-    const target =
-      e.target instanceof Element
-        ? e.target
-        : null;
+    const target = e.target instanceof Element
+      ? e.target
+      : null;
 
     const tile = target && target.closest(
       '.shoupai.main .bingpai ' +
@@ -515,7 +581,6 @@
     if (!document.body) return;
 
     checkCommitted();
-
     if (Date.now() < reviewUntil) return;
 
     const hand = getHand();
@@ -523,8 +588,8 @@
 
     const choices = hand
       ? [...hand.querySelectorAll(
-          '.pai[role="button"][data-pai]'
-        )].map(el => el.dataset.pai)
+        '.pai[role="button"][data-pai]'
+      )].map(el => el.dataset.pai)
       : [];
 
     const valid =
@@ -539,17 +604,15 @@
       if (active) {
         unmark();
         active = null;
+        ++lookaheadSerial;
         tapped = null;
-
         if (hintOpen) renderHint();
       }
       return;
     }
 
-    // 手牌以外の公開牌を読む
     const publicInfo = readPublicTiles();
 
-    // 河が変化した場合も再分析する
     const key =
       tiles.join('/') + '|' +
       choices.join('/') + '|public:' +
@@ -558,6 +621,7 @@
     if (active && key === active.key) return;
 
     unmark();
+    ++lookaheadSerial;
     tapped = null;
 
     try {
@@ -568,60 +632,51 @@
 
       const ranks = [...new Set(choices)]
         .map(p => analyze(
-          tiles, p, known.counts
+          tiles,
+          p,
+          known.counts
         ))
         .filter(Boolean)
-        .sort((a, b) =>
-          a.shanten - b.shanten ||
-          b.upper - a.upper ||
-          b.types.length - a.types.length ||
-          Number(a.cut[1] === '0') -
-          Number(b.cut[1] === '0')
-        );
+        .sort(compareRank);
 
       if (!ranks.length) return;
 
       const publicStatus = known.invalid
-        ? '公開牌の重複を検知し手牌のみ'
+        ? '公開牌の重複を検知、手牌のみ'
         : known.publicCount > 0
           ? '読み取れた公開牌' +
             known.publicCount + '枚を補正'
-          : '手牌のみで計算（公開牌の取得未確認）';
+          : '手牌のみ（公開牌の取得未確認）';
 
-      active = {
+      const position = {
         key,
         tiles: tiles.slice(),
         ranks,
-        publicStatus
+        publicStatus,
+        lookahead: null,
+        lookaheadStatus: '計算中…'
       };
 
-      const elements = [
-        ...hand.querySelectorAll('.pai[data-pai]')
-      ];
-
-      marks = elements
-        .filter(
-          el => el.dataset.pai === ranks[0].cut
-        )
-        .map(el => ({
-          el,
-          outline: el.style.outline,
-          offset: el.style.outlineOffset
-        }));
-
-      for (const m of marks) {
-        m.el.style.outline = '3px solid #ffd54a';
-        m.el.style.outlineOffset = '-2px';
-      }
-
-      reviewUntil = 0;
+      active = position;
+      updateMarks(position);
 
       if (hintOpen) renderHint();
 
+      const hasOwnMeld = !!document.querySelector(
+        '.shoupai.main .fulou .pai, ' +
+        '.shoupai.main .fulou .mianzi'
+      );
+
+      if (hasOwnMeld) {
+        position.lookaheadStatus =
+          '自分の鳴き手は未対応（従来の評価）';
+        if (hintOpen) renderHint();
+      } else {
+        startLookahead(position, known.counts);
+      }
     } catch (err) {
       console.warn('Coach:', err);
       active = null;
-
       if (hintOpen) renderHint();
     }
   }
@@ -636,123 +691,119 @@
 
     style.textContent = `
 #majiang-coach-panel {
-  position: fixed;
-  top: calc(12px + env(safe-area-inset-top, 0px));
-  right: calc(8px + env(safe-area-inset-right, 0px));
-  z-index: 99999;
-  box-sizing: border-box;
-  max-width: 82vw;
-  max-height: 60dvh;
-  overflow: auto;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: #102b27;
-  color: white;
-  font: 13px/1.5 sans-serif;
-  white-space: pre-line;
-  box-shadow: 0 3px 14px #0008;
-  pointer-events: auto;
+  position:fixed;
+  top:calc(12px + env(safe-area-inset-top,0px));
+  right:calc(8px + env(safe-area-inset-right,0px));
+  z-index:99999;
+  box-sizing:border-box;
+  max-width:82vw;
+  max-height:60dvh;
+  overflow:auto;
+  padding:10px 12px;
+  border-radius:12px;
+  background:#102b27;
+  color:white;
+  font:13px/1.5 sans-serif;
+  white-space:pre-line;
+  box-shadow:0 3px 14px #0008;
+  pointer-events:auto;
 }
 
 #majiang-coach-history-box {
-  position: fixed;
-  left: calc(12px + env(safe-area-inset-left, 0px));
-  bottom: calc(90px + env(safe-area-inset-bottom, 0px));
-  z-index: 100001;
-  box-sizing: border-box;
-  width: min(340px, calc(100vw - 24px));
-  max-height: 45dvh;
-  overflow: auto;
-  padding: 12px;
-  border-radius: 12px;
-  background: #102b27;
-  color: white;
-  box-shadow: 0 3px 14px #0008;
-  font: 13px/1.7 sans-serif;
+  position:fixed;
+  left:calc(12px + env(safe-area-inset-left,0px));
+  bottom:calc(90px + env(safe-area-inset-bottom,0px));
+  z-index:100001;
+  box-sizing:border-box;
+  width:min(340px,calc(100vw - 24px));
+  max-height:45dvh;
+  overflow:auto;
+  padding:12px;
+  border-radius:12px;
+  background:#102b27;
+  color:white;
+  box-shadow:0 3px 14px #0008;
+  font:13px/1.7 sans-serif;
 }
 
 #majiang-coach-history-button,
 #majiang-coach-hint-button {
-  position: fixed;
-  z-index: 100002;
-  box-sizing: border-box;
-  width: auto;
-  min-width: 0;
-  padding: 8px 9px;
-  border: 1px solid #8ac5b2;
-  border-radius: 18px;
-  background: #123b32;
-  color: #fff;
-  font: 12px/1.3 sans-serif;
-  white-space: nowrap;
-  cursor: pointer;
+  position:fixed;
+  z-index:100002;
+  box-sizing:border-box;
+  width:auto;
+  min-width:0;
+  padding:8px 9px;
+  border:1px solid #8ac5b2;
+  border-radius:18px;
+  background:#123b32;
+  color:#fff;
+  font:12px/1.3 sans-serif;
+  white-space:nowrap;
+  cursor:pointer;
 }
 
 #majiang-coach-history-button {
-  left: calc(12px + env(safe-area-inset-left, 0px));
-  top: calc(160px + env(safe-area-inset-top, 0px));
+  left:calc(12px + env(safe-area-inset-left,0px));
+  top:calc(160px + env(safe-area-inset-top,0px));
 }
 
 #majiang-coach-hint-button {
-  right: calc(12px + env(safe-area-inset-right, 0px));
-  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  right:calc(12px + env(safe-area-inset-right,0px));
+  bottom:calc(12px + env(safe-area-inset-bottom,0px));
 }
 
 .majiang-coach-history-clear {
-  margin-top: 12px;
-  padding: 6px;
-  border: 1px solid white;
-  border-radius: 6px;
-  background: transparent;
-  color: white;
+  margin-top:12px;
+  padding:6px;
+  border:1px solid white;
+  border-radius:6px;
+  background:transparent;
+  color:white;
 }
 
-@media (orientation: landscape) {
+@media (orientation:landscape) {
   #majiang-coach-panel {
-    top: calc(10px + env(safe-area-inset-top, 0px));
-    right: calc(12px + env(safe-area-inset-right, 0px));
-    max-width: 36vw;
-    max-height: 72dvh;
-    font-size: 12px;
+    top:calc(10px + env(safe-area-inset-top,0px));
+    right:calc(12px + env(safe-area-inset-right,0px));
+    max-width:36vw;
+    max-height:72dvh;
+    font-size:12px;
   }
 
   #majiang-coach-history-box {
-    left: calc(12px + env(safe-area-inset-left, 0px));
-    bottom: calc(48px + env(safe-area-inset-bottom, 0px));
-    width: min(340px, 36vw);
-    max-height: 65dvh;
+    left:calc(12px + env(safe-area-inset-left,0px));
+    bottom:calc(48px + env(safe-area-inset-bottom,0px));
+    width:min(340px,36vw);
+    max-height:65dvh;
   }
 
   #majiang-coach-history-button {
-    top: auto;
-    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    top:auto;
+    bottom:calc(8px + env(safe-area-inset-bottom,0px));
   }
 
   #majiang-coach-hint-button {
-    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    bottom:calc(8px + env(safe-area-inset-bottom,0px));
   }
 }
 `;
+
     document.head.appendChild(style);
   }
 
   function start() {
     installStyle();
 
-    if (!historyButton.isConnected) {
-      document.body.appendChild(historyButton);
-    }
-
-    if (!historyBox.isConnected) {
-      document.body.appendChild(historyBox);
-    }
-
-    if (!hintButton.isConnected) {
-      document.body.appendChild(hintButton);
-    }
-
-    if (!panel.isConnected) {
-      document.body.appendChild(panel);
+    for (const el of [
+      historyButton,
+      historyBox,
+      hintButton,
+      panel
+    ]) {
+      if (!el.isConnected) {
+        document.body.appendChild(el);
+      }
     }
 
     update();
@@ -762,9 +813,7 @@
       if (tapped) checkCommitted();
     });
 
-    const hand = document.querySelector(
-      '.shoupai.main'
-    );
+    const hand = document.querySelector('.shoupai.main');
 
     if (hand) {
       observer.observe(hand, {
